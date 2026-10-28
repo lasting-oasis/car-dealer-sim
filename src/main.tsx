@@ -1,41 +1,72 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, lazy, Suspense } from 'react'
 import ReactDOM from 'react-dom/client'
-import App from './App.tsx'
-import ShopManagement from './ShopManagement.tsx'
-import MechanicManagement from './MechanicManagement.tsx'
-import StandaloneShopPlatform from './StandaloneShopPlatform.tsx'
+import { loadChunk } from './loadChunk'
+import { ChunkBoundary } from './ChunkBoundary'
+// Each app is downloaded only when opened, so the launchpad (and each tool)
+// loads without pulling in the whole 3D game and every ERP screen up front.
+// loadChunk reloads the page once if a chunk is gone after a redeploy;
+// ChunkBoundary shows a Reload button if a screen still can't load.
+const App = lazy(() => loadChunk(import('./App.tsx')))
+const ShopManagement = lazy(() => loadChunk(import('./ShopManagement.tsx')))
+const MechanicManagement = lazy(() => loadChunk(import('./MechanicManagement.tsx')))
+const StandaloneShopPlatform = lazy(() => loadChunk(import('./StandaloneShopPlatform.tsx')))
+const Loading = () => (
+  <div className="w-full py-24 grid place-items-center text-white/40 text-xs font-black uppercase tracking-widest">{t(useLang(), 'loading.default')}</div>
+)
 import './index.css'
 import { useGameStore } from './store'
 import { Wrench, Gamepad2, ArrowRight, ShieldCheck, CheckCircle, Gauge, Activity } from 'lucide-react'
 import { motion } from 'framer-motion'
-import { useLang, t, LangToggle } from './i18n'
-// Global Error Overlay Catcher for Debugging Sandboxed/Compatibility crashes
+import { useLang, t, LangToggle, getLang } from './i18n'
+// Global error catcher.
+// - Development: full-screen overlay with message, source and stack (as before).
+// - Production: a small dismissable notice, so a harmless error (often from a
+//   browser extension) no longer takes over the whole screen mid-game.
+// Error text is inserted with textContent, never as HTML.
+const isOwnScript = (filename?: string) => !filename || filename.startsWith(window.location.origin);
+const el = (tag: string, style: string, text?: string) => {
+    const node = document.createElement(tag);
+    node.style.cssText = style;
+    if (text !== undefined) node.textContent = text;
+    return node;
+};
+const showDevErrorOverlay = (event: ErrorEvent) => {
+    document.getElementById('debug-error-overlay')?.remove();
+    const box = el('div', 'position: fixed; inset: 0; background: rgba(15, 23, 42, 0.98); color: #f87171; font-family: monospace; font-size: 13px; padding: 24px; z-index: 999999; overflow: auto; display: flex; flex-direction: column; gap: 16px; border: 4px solid #ef4444; pointer-events: auto;');
+    box.id = 'debug-error-overlay';
+    box.appendChild(el('h2', 'color: #ef4444; font-size: 18px; font-weight: 900; margin: 0; border-bottom: 2px solid #ef4444; padding-bottom: 8px;', '⚠️ CRITICAL RUNTIME CRASH CAPTURED'));
+    const section = (label: string, body: string, pre = false) => {
+        const wrap = el('div', 'background: rgba(0,0,0,0.5); padding: 12px; border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.2);' + (pre ? ' flex-grow: 1;' : ''));
+        wrap.appendChild(el('strong', 'color: #ffffff; display: block; margin-bottom: 4px;', label));
+        wrap.appendChild(el(pre ? 'pre' : 'div', pre ? 'margin: 0; white-space: pre-wrap; word-break: break-all; line-height: 1.4; color: #fca5a5;' : '', body));
+        box.appendChild(wrap);
+    };
+    section('Message:', event.message || 'Unknown unhandled error');
+    section('Source:', `${event.filename || 'unknown'}:${event.lineno || 0}:${event.colno || 0}`);
+    section('Stack Trace:', event.error?.stack || 'No stack trace available', true);
+    const close = el('button', 'align-self: flex-end; padding: 10px 20px; background: #ef4444; color: white; border: none; border-radius: 8px; font-weight: bold; cursor: pointer;', 'Close Overlay');
+    close.onclick = () => box.remove();
+    box.appendChild(close);
+    document.body.appendChild(box);
+};
+const showProdErrorNotice = () => {
+    if (document.getElementById('error-notice')) return; // one at a time
+    const note = el('div', 'position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 999999; display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: rgba(15,23,42,0.95); color: #fecaca; border: 1px solid rgba(239,68,68,0.5); border-radius: 12px; font: 600 12px system-ui, sans-serif; box-shadow: 0 8px 24px rgba(0,0,0,0.4); pointer-events: auto;', t(getLang(), 'error.notice'));
+    note.id = 'error-notice';
+    note.setAttribute('role', 'alert');
+    const dismiss = el('button', 'background: none; border: none; color: #f87171; font: 800 14px system-ui; cursor: pointer; padding: 0 2px;', '✕');
+    dismiss.setAttribute('aria-label', t(getLang(), 'error.dismiss'));
+    dismiss.onclick = () => note.remove();
+    note.appendChild(dismiss);
+    document.body.appendChild(note);
+    setTimeout(() => note.remove(), 12000);
+};
 window.addEventListener('error', (event) => {
-    const errorContainer = document.createElement('div');
-    errorContainer.id = 'debug-error-overlay';
-    errorContainer.style.cssText = 'position: fixed; inset: 0; background: rgba(15, 23, 42, 0.98); color: #f87171; font-family: monospace; font-size: 13px; padding: 24px; z-index: 999999; overflow: auto; display: flex; flex-direction: column; gap: 16px; border: 4px solid #ef4444; pointer-events: auto;';
-    
-    errorContainer.innerHTML = `
-        <h2 style="color: #ef4444; font-size: 18px; font-weight: 900; margin: 0; border-bottom: 2px solid #ef4444; padding-bottom: 8px;">
-            ⚠️ CRITICAL RUNTIME CRASH CAPTURED
-        </h2>
-        <div style="background: rgba(0,0,0,0.5); padding: 12px; border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.2);">
-            <strong style="color: #ffffff; display: block; margin-bottom: 4px;">Message:</strong>
-            ${event.message || 'Unknown unhandled error'}
-        </div>
-        <div style="background: rgba(0,0,0,0.5); padding: 12px; border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.2);">
-            <strong style="color: #ffffff; display: block; margin-bottom: 4px;">Source:</strong>
-            ${event.filename || 'unknown'}:${event.lineno || 0}:${event.colno || 0}
-        </div>
-        <div style="background: rgba(0,0,0,0.5); padding: 12px; border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.2); flex-grow: 1;">
-            <strong style="color: #ffffff; display: block; margin-bottom: 4px;">Stack Trace:</strong>
-            <pre style="margin: 0; white-space: pre-wrap; word-break: break-all; line-height: 1.4; color: #fca5a5;">${event.error?.stack || 'No stack trace available'}</pre>
-        </div>
-        <button onclick="document.getElementById('debug-error-overlay').remove()" style="align-self: flex-end; padding: 10px 20px; background: #ef4444; color: white; border: none; border-radius: 8px; font-weight: bold; cursor: pointer;">
-            Close Overlay
-        </button>
-    `;
-    document.body.appendChild(errorContainer);
+    if (!isOwnScript(event.filename)) return; // browser extensions, third-party scripts
+    if (!event.error && event.message === 'Script error.') return; // same, when the browser hides the source (cross-origin script)
+    console.error(event.error || event.message);
+    if (import.meta.env.DEV) showDevErrorOverlay(event);
+    else showProdErrorNotice();
 });
 
 function GatewayPortal() {
@@ -122,9 +153,11 @@ function GatewayPortal() {
           onClick={goBackToGateway}
           className="absolute top-4 left-4 z-[9999] px-4 py-2.5 bg-black/60 border border-white/20 hover:border-market/40 rounded-xl hover:bg-black/95 text-xs font-black uppercase tracking-widest text-white hover:text-market transition-all duration-300 flex items-center gap-1.5 shadow-[0_4px_20px_rgba(0,0,0,0.5)] pointer-events-auto"
         >
-          ← Exit to Launchpad
+          {/* Short label on phones so it fits beside the top-right [graphics][Menu] buttons */}
+          <span className="sm:hidden">← Exit</span>
+          <span className="hidden sm:inline">← Exit to Launchpad</span>
         </button>
-        <App />
+        <ChunkBoundary><Suspense fallback={<Loading />}><App /></Suspense></ChunkBoundary>
       </div>
     );
   }
@@ -157,7 +190,7 @@ function GatewayPortal() {
 
         {/* Main Bodyshop ERP Content Area */}
         <main className="relative z-10 flex-grow w-full max-w-7xl mx-auto px-4 md:px-8 py-6 flex items-center justify-center">
-          <ShopManagement />
+          <ChunkBoundary><Suspense fallback={<Loading />}><ShopManagement /></Suspense></ChunkBoundary>
         </main>
 
         {/* Professional ERP footer */}
@@ -196,7 +229,7 @@ function GatewayPortal() {
 
         {/* Main Mechanic ERP Content Area */}
         <main className="relative z-10 flex-grow w-full max-w-7xl mx-auto px-4 md:px-8 py-6 flex items-center justify-center">
-          <MechanicManagement />
+          <ChunkBoundary><Suspense fallback={<Loading />}><MechanicManagement /></Suspense></ChunkBoundary>
         </main>
 
         {/* Professional ERP footer */}
@@ -235,7 +268,7 @@ function GatewayPortal() {
 
         {/* Main Platform Content Area */}
         <main className="relative z-10 flex-grow w-full max-w-7xl mx-auto px-4 md:px-8 py-6 flex items-center justify-center">
-          <StandaloneShopPlatform />
+          <ChunkBoundary><Suspense fallback={<Loading />}><StandaloneShopPlatform /></Suspense></ChunkBoundary>
         </main>
 
         {/* Professional ERP footer */}

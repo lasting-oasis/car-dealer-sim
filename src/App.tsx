@@ -1,14 +1,25 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, lazy, Suspense } from 'react';
 import { useGameStore } from './store';
-import { VanillaThreeScene } from './VanillaThreeScene';
-import { Wallet, LogIn, Activity, Clock, TrendingUp, TrendingDown, DollarSign, Users, FileText, Wrench, ChevronLeft, ChevronRight, BookOpen, HelpCircle, Car, Menu, Gamepad2, Sparkles, Map as MapIcon, X, LineChart, ShieldCheck, MessageSquare, Send, Fuel, Flag } from 'lucide-react';
+import { Wallet, LogIn, Activity, Clock, TrendingUp, TrendingDown, DollarSign, Users, FileText, Wrench, ChevronLeft, ChevronRight, BookOpen, HelpCircle, Car, Menu, Gamepad2, Sparkles, Map as MapIcon, X, LineChart, ShieldCheck, MessageSquare, Send, Fuel, Flag, Gauge } from 'lucide-react';
 import { RACE_TIERS, RaceDifficulty } from './types';
 import { useLang, t, LangToggle } from './i18n';
 import { MECHANIC_LIB, BODY_LIB } from './constants';
 import { motion, AnimatePresence } from 'framer-motion';
-import StandaloneShopPlatform from './StandaloneShopPlatform';
-import ShopManagement from './ShopManagement';
+import { loadChunk } from './loadChunk';
+import { ChunkBoundary } from './ChunkBoundary';
+// Heavy screens load on demand. The 3D world (three.js) starts downloading as
+// soon as the setup screen shows, so it's usually ready by the time you join.
+// loadChunk reloads the page once if a chunk is gone after a redeploy;
+// ChunkBoundary shows a Reload button if a screen still can't load.
+const loadScene = () => loadChunk(import('./VanillaThreeScene'));
+const VanillaThreeScene = lazy(() => loadScene().then(m => ({ default: m.VanillaThreeScene })));
+const StandaloneShopPlatform = lazy(() => loadChunk(import('./StandaloneShopPlatform')));
+const ShopManagement = lazy(() => loadChunk(import('./ShopManagement')));
+const TabLoading = () => (
+  <div className="w-full py-24 grid place-items-center text-white/40 text-xs font-black uppercase tracking-widest">{t(useLang(), 'loading.default')}</div>
+);
 import { LIBRARY_BOOKS } from './libraryData';
+import { getCarSpec, specLine } from './carSpecs';
 
 
 // Fixed points of interest in the world (x, z world coords) shown on the map.
@@ -18,12 +29,33 @@ const MAP_LOCATIONS = [
   { name: 'Bank — Financing', x: 45, z: 140, color: '#38bdf8' },
   { name: 'Auto Auction', x: -60, z: 240, color: '#f97316' },
   { name: 'Downtown Towers', x: 0, z: 310, color: '#94a3b8' },
-  { name: 'Shopping Plaza', x: -30, z: 450, color: '#a78bfa' },
+  { name: 'City Parks', x: -30, z: 450, color: '#4ade80' },
   { name: 'Warehouse District', x: 0, z: 680, color: '#f43f5e' },
   { name: 'Speedway', x: 0, z: 1750, color: '#818cf8' },
   { name: 'Gas Station', x: 135, z: 80, color: '#ef4444' },
   { name: 'Gas Station', x: 45, z: 1700, color: '#ef4444' },
 ];
+
+// Low/High 3D graphics. Low turns off shadows and renders at 1x resolution —
+// a big frame-rate win on phones, tablets and older laptops. Saved per device.
+const GraphicsToggle = ({ compact }: { compact?: boolean }) => {
+  const quality = useGameStore(s => s.graphicsQuality);
+  const setQuality = useGameStore(s => s.setGraphicsQuality);
+  const lang = useLang();
+  const next = quality === 'high' ? 'low' : 'high';
+  return (
+    <button
+      type="button"
+      onClick={() => setQuality(next)}
+      title={t(lang, quality === 'high' ? 'graphics.toLow' : 'graphics.toHigh')}
+      aria-label={t(lang, quality === 'high' ? 'graphics.highAria' : 'graphics.lowAria')}
+      className={`flex items-center gap-1.5 rounded-xl border backdrop-blur-md font-black uppercase tracking-widest transition-all active:scale-95 ${compact ? 'px-3 py-3 text-[10px]' : 'px-3 py-1.5 text-[10px]'} bg-black/60 border-white/20 text-white/70 hover:text-white hover:border-white/40`}
+    >
+      <Gauge size={12} className={quality === 'high' ? 'text-emerald-400' : 'text-amber-400'} />
+      {compact ? t(lang, quality === 'high' ? 'graphics.highShort' : 'graphics.lowShort') : t(lang, quality === 'high' ? 'graphics.high' : 'graphics.low')}
+    </button>
+  );
+};
 
 const LiveMap = ({ gameState, playerId, isMobile }: { gameState: any, playerId: string, isMobile?: boolean }) => {
   const [expanded, setExpanded] = useState(false);
@@ -47,6 +79,9 @@ const LiveMap = ({ gameState, playerId, isMobile }: { gameState: any, playerId: 
   // position, so the player stays pinned at the centre and the map scrolls under them.
   const me = gameState.players?.[playerId];
   const myWorldPos = useGameStore(s => s.myWorldPos);
+  // Other players' live positions (relayed ~10x/sec); fall back to the last full update.
+  const livePositions = useGameStore(s => s.playerPositions);
+  const posOf = (p: any) => livePositions[p.id] || p.worldPosition;
   const pw = myWorldPos || me?.worldPosition || { x: 0, z: 0 };
   const toMiniX = (w: number) => Math.max(3, Math.min(size - 3, mapCenter + (w - pw.x) * mapScale));
   const toMiniZ = (w: number) => Math.max(3, Math.min(size - 3, mapCenter + (w - pw.z) * mapScale));
@@ -77,9 +112,10 @@ const LiveMap = ({ gameState, playerId, isMobile }: { gameState: any, playerId: 
          </div>
          {/* Other dealers, positioned relative to you */}
          {Object.values(gameState.players).map((p: any) => {
-            if (p.id === playerId || !p.worldPosition) return null;
-            const x = toMiniX(p.worldPosition.x);
-            const z = toMiniZ(p.worldPosition.z);
+            const wp = posOf(p);
+            if (p.id === playerId || !wp) return null;
+            const x = toMiniX(wp.x);
+            const z = toMiniZ(wp.z);
             return (
                <div key={p.id} className="absolute transform -translate-x-1/2 -translate-y-1/2 transition-all duration-200" style={{ left: `${x}px`, top: `${z}px` }}>
                   <div className={`rounded-full bg-orange-500 shadow-[0_0_8px_rgba(249,115,22,0.8)] ${isMobile ? 'w-1 h-1' : 'w-2 h-2'}`}></div>
@@ -126,7 +162,7 @@ const LiveMap = ({ gameState, playerId, isMobile }: { gameState: any, playerId: 
                     ))}
                     {Object.values(gameState.players).map((p: any) => {
                        const isMe = p.id === playerId;
-                       const wpos = isMe ? (myWorldPos || p.worldPosition) : p.worldPosition;
+                       const wpos = isMe ? (myWorldPos || p.worldPosition) : posOf(p);
                        if (!wpos) return null;
                        return (
                           <div key={p.id} className="absolute -translate-x-1/2 -translate-y-1/2 flex flex-col items-center" style={{ left: exX(wpos.x), top: exZ(wpos.z) }}>
@@ -732,6 +768,7 @@ const AuctionCarCard = ({ car, me, buyCar, buyPsi, expandedCarId, setExpandedCar
                 </div>
               </div>
               <div className="text-[10px] text-gray-500 font-mono mt-1 mb-1 tracking-widest">{car.vin} | {car.mileage.toLocaleString()} mi</div>
+              <div className="text-[10px] text-gray-400 mb-1">{specLine(getCarSpec(car))} · {getCarSpec(car).topSpeedMph} mph top</div>
               <ConditionDisplay car={car} expandedCarId={expandedCarId} setExpandedCarId={setExpandedCarId} buyPsi={buyPsi} money={me?.money} />
             </div>
             <div className="text-success font-bold mt-1 mr-5">${car.buyPrice.toLocaleString()}</div>
@@ -800,7 +837,14 @@ const AuctionCarCard = ({ car, me, buyCar, buyPsi, expandedCarId, setExpandedCar
 };
 
 const InspectionModal = () => {
-  const { activeInspectionCarId, activeInspectionShopType, closeInspectionModal, performSpecificRepair, gameState, playerId } = useGameStore();
+  // Individual selectors: only re-render when these values change (a bare
+  // useGameStore() re-rendered on every fuel/HUD/GPS tick while driving).
+  const activeInspectionCarId = useGameStore(s => s.activeInspectionCarId);
+  const activeInspectionShopType = useGameStore(s => s.activeInspectionShopType);
+  const closeInspectionModal = useGameStore(s => s.closeInspectionModal);
+  const performSpecificRepair = useGameStore(s => s.performSpecificRepair);
+  const gameState = useGameStore(s => s.gameState);
+  const playerId = useGameStore(s => s.playerId);
   if (!activeInspectionCarId || !gameState || !playerId) return null;
 
   const me = gameState.players[playerId];
@@ -911,7 +955,12 @@ const InspectionModal = () => {
 };
 
 const BankDashboard = () => {
-  const { isBankModalOpen, closeBankModal, payFloorPlan, takeTitleLoan, gameState, playerId } = useGameStore();
+  const isBankModalOpen = useGameStore(s => s.isBankModalOpen);
+  const closeBankModal = useGameStore(s => s.closeBankModal);
+  const payFloorPlan = useGameStore(s => s.payFloorPlan);
+  const takeTitleLoan = useGameStore(s => s.takeTitleLoan);
+  const gameState = useGameStore(s => s.gameState);
+  const playerId = useGameStore(s => s.playerId);
   const me = gameState?.players[playerId || ''];
   const [activeTab, setActiveTab] = useState<'account' | 'collateral'>('account');
   const [selectedCarId, setSelectedCarId] = useState<string | null>(null);
@@ -927,7 +976,8 @@ const BankDashboard = () => {
     let maxAdvance = marketVal * 0.8;
 
     const offers = [];
-    if (car.accidents === 0) { maxAdvance += 2000; offers.push({ title: 'Clean Title Advance', val: 2000 }); }
+    // Same rule as the server's take_title_loan: no accident history on record counts as clean.
+    if (car.accidents === 0 || car.accidents === undefined) { maxAdvance += 2000; offers.push({ title: 'Clean Title Advance', val: 2000 }); }
     if (car.mileage < 50000) { maxAdvance += 500; offers.push({ title: 'Low Mileage Premium', val: 500 }); }
     if (car.bodyCondition > 90 && car.mechanicCondition > 90) { maxAdvance += 1500; offers.push({ title: 'Mint Condition Credit', val: 1500 }); }
     if (car.titleStatus === 'Salvage') { maxAdvance -= 5000; offers.push({ title: 'Subprime / Salvage Penalty', val: -5000 }); }
@@ -983,8 +1033,8 @@ const BankDashboard = () => {
                   Manage your Floor Plan line of credit to reduce daily interest expenditures and free up leveraging power for future inventory acquisitions.
                 </p>
                 <div className="flex gap-2 w-full">
-                  <button onClick={() => payFloorPlan(10000)} disabled={me.money < 10000 || me.floorPlanDebt <= 0} className="flex-1 bg-white hover:bg-gray-50 text-[#005ea2] border-2 border-[#bbd4e7] hover:border-[#005ea2] transition-colors py-3 rounded-lg font-black tracking-widest text-sm disabled:opacity-50 disabled:cursor-not-allowed uppercase">Pay $10k</button>
-                  <button onClick={() => payFloorPlan(50000)} disabled={me.money < 50000 || me.floorPlanDebt <= 0} className="flex-1 bg-white hover:bg-gray-50 text-[#005ea2] border-2 border-[#bbd4e7] hover:border-[#005ea2] transition-colors py-3 rounded-lg font-black tracking-widest text-sm disabled:opacity-50 disabled:cursor-not-allowed uppercase">Pay $50k</button>
+                  <button onClick={() => payFloorPlan(Math.min(10000, me.floorPlanDebt))} disabled={me.money < Math.min(10000, me.floorPlanDebt) || me.floorPlanDebt <= 0} className="flex-1 bg-white hover:bg-gray-50 text-[#005ea2] border-2 border-[#bbd4e7] hover:border-[#005ea2] transition-colors py-3 rounded-lg font-black tracking-widest text-sm disabled:opacity-50 disabled:cursor-not-allowed uppercase">Pay $10k</button>
+                  <button onClick={() => payFloorPlan(Math.min(50000, me.floorPlanDebt))} disabled={me.money < Math.min(50000, me.floorPlanDebt) || me.floorPlanDebt <= 0} className="flex-1 bg-white hover:bg-gray-50 text-[#005ea2] border-2 border-[#bbd4e7] hover:border-[#005ea2] transition-colors py-3 rounded-lg font-black tracking-widest text-sm disabled:opacity-50 disabled:cursor-not-allowed uppercase">Pay $50k</button>
                   <button onClick={() => payFloorPlan(me.floorPlanDebt)} disabled={me.money < me.floorPlanDebt || me.floorPlanDebt <= 0} className="flex-1 bg-[#005ea2] hover:bg-[#004b82] text-white transition-colors py-3 rounded-lg font-black tracking-widest text-sm disabled:opacity-50 disabled:cursor-not-allowed uppercase border-2 border-transparent">Pay Full Bal.</button>
                 </div>
               </div>
@@ -998,7 +1048,7 @@ const BankDashboard = () => {
                 <div key={car.id} onClick={() => setSelectedCarId(car.id)} className={`p-4 rounded-lg border-2 cursor-pointer transition-all flex justify-between items-center ${car.isLienActive ? 'border-red-200 bg-red-50 opacity-50 pointer-events-none' : 'border-gray-200 hover:border-[#005ea2] bg-white hover:shadow-md'}`}>
                   <div className="flex flex-col gap-1">
                     <span className="font-black text-lg text-slate-800">{car.year} {car.make} {car.model}</span>
-                    <span className="text-xs text-gray-500 uppercase font-bold tracking-wider">{car.mileage.toLocaleString()} mi | {car.title} Title</span>
+                    <span className="text-xs text-gray-500 uppercase font-bold tracking-wider">{car.mileage.toLocaleString()} mi | {car.titleStatus} Title</span>
                   </div>
                   {car.isLienActive ? (
                     <span className="text-xs font-bold text-red-600 bg-red-100 px-3 py-1 rounded-full uppercase tracking-widest">Lien Active</span>
@@ -1444,7 +1494,12 @@ const DealerGuideModal = ({ isOpen, onClose, step, setStep }: { isOpen: boolean;
 };
 
 const NegotiationModal = ({ agentId, setAgentId, carId, setCarId }: any) => {
-  const { gameState, playerId, proposeDeal, counterOffer, rejectDeal, finalizeDeal } = useGameStore();
+  const gameState = useGameStore(s => s.gameState);
+  const playerId = useGameStore(s => s.playerId);
+  const proposeDeal = useGameStore(s => s.proposeDeal);
+  const counterOffer = useGameStore(s => s.counterOffer);
+  const rejectDeal = useGameStore(s => s.rejectDeal);
+  const finalizeDeal = useGameStore(s => s.finalizeDeal);
   const [counterInput, setCounterInput] = useState('');
   
   if (!gameState || !playerId || !agentId) return null;
@@ -1457,8 +1512,10 @@ const NegotiationModal = ({ agentId, setAgentId, carId, setCarId }: any) => {
       return null;
   }
 
-  const car = carId ? me.inventory.find((c: any) => c.id === carId) : null;
   const proposal = agent.activeProposal;
+  // Closing the popup clears the picked car, so a reopened negotiation takes it from the proposal.
+  const dealCarId = proposal?.carId || carId;
+  const car = dealCarId ? me.inventory.find((c: any) => c.id === dealCarId) : null;
 
   return (
     <AnimatePresence>
@@ -1491,7 +1548,7 @@ const NegotiationModal = ({ agentId, setAgentId, carId, setCarId }: any) => {
           {agent.state === 'browsing' ? (
             <div className="flex flex-col gap-2 max-h-[40vh] overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-white/10">
                <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest border-b border-white/10 pb-1 mb-1">Available Inventory</h3>
-               {me.inventory.filter((c:any) => c.isProcessed && c.isRegistered && c.titleStatus !== 'Salvage').map((c:any) => (
+               {me.inventory.filter((c:any) => c.isProcessed && c.isRegistered && c.safetyPassed && c.titleStatus !== 'Salvage').map((c:any) => (
                    <div key={c.id} onClick={() => setCarId(c.id)} className={`p-3 rounded border cursor-pointer flex justify-between items-center transition-colors ${carId === c.id ? 'bg-blue-500/20 border-blue-500' : 'bg-black/40 border-white/5 hover:border-white/20'}`}>
                        <div className="flex flex-col">
                            <span className="text-sm font-bold text-white">{c.year} {c.make} {c.model}</span>
@@ -1503,8 +1560,8 @@ const NegotiationModal = ({ agentId, setAgentId, carId, setCarId }: any) => {
                        </div>
                    </div>
                ))}
-               {me.inventory.filter((c:any) => c.isProcessed && c.isRegistered && c.titleStatus !== 'Salvage').length === 0 && (
-                   <div className="text-gray-500 italic text-sm text-center p-4">No eligible cars on the lot. Ensure cars are washed, registered, and parked on the display pad.</div>
+               {me.inventory.filter((c:any) => c.isProcessed && c.isRegistered && c.safetyPassed && c.titleStatus !== 'Salvage').length === 0 && (
+                   <div className="text-gray-500 italic text-sm text-center p-4">No eligible cars on the lot. Ensure cars pass the DMV safety inspection, are washed, registered, and parked on the display pad.</div>
                )}
                
                <button 
@@ -1538,7 +1595,8 @@ const NegotiationModal = ({ agentId, setAgentId, carId, setCarId }: any) => {
                          />
                          <button 
                             onClick={() => { counterOffer(agent.id, Number(counterInput)); setCounterInput(''); }}
-                            className="bg-market/20 text-market hover:bg-market hover:text-black border border-market/50 px-4 rounded font-bold uppercase text-xs transition-colors"
+                            disabled={!(Number(counterInput) > 0)}
+                            className="bg-market/20 text-market hover:bg-market hover:text-black border border-market/50 px-4 rounded font-bold uppercase text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                          >
                              Counter
                          </button>
@@ -1566,8 +1624,11 @@ const ClockDisplay = () => {
   const timeOfDay = useGameStore(s => s.timeOfDay);
   const day = useGameStore(s => s.gameState?.day || 1);
   const isAuctionOpen = useGameStore(s => s.timeOfDay >= 8.0 && s.timeOfDay < 17.0);
-  const hours = Math.floor(timeOfDay);
-  const minutes = Math.floor((timeOfDay - hours) * 60);
+  // Round to the minute: the server adds 1/30 h a tick, so the clock is often a
+  // hair under a whole minute (8.0333332) and truncating showed 8:01 for 8:02.
+  const totalMinutes = Math.round(timeOfDay * 60);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
   const ampm = hours >= 12 && hours < 24 ? 'PM' : 'AM';
   const displayHours = hours % 12 || 12;
   const timeString = `${displayHours}:${minutes.toString().padStart(2, '0')} ${ampm}`;
@@ -1585,7 +1646,12 @@ const ClockDisplay = () => {
 };
 
 const InsuranceModal = () => {
-  const { isInsuranceModalOpen, closeInsuranceModal, gameState, playerId, buyInsurance, cancelInsurance } = useGameStore();
+  const isInsuranceModalOpen = useGameStore(s => s.isInsuranceModalOpen);
+  const closeInsuranceModal = useGameStore(s => s.closeInsuranceModal);
+  const gameState = useGameStore(s => s.gameState);
+  const playerId = useGameStore(s => s.playerId);
+  const buyInsurance = useGameStore(s => s.buyInsurance);
+  const cancelInsurance = useGameStore(s => s.cancelInsurance);
   const me = gameState?.players[playerId || ''];
   if (!isInsuranceModalOpen || !me) return null;
   const policies = [
@@ -1730,6 +1796,12 @@ const GameChat = ({ isMobile }: { isMobile?: boolean }) => {
 const RacingHud = (_props: { isMobile?: boolean }) => {
   const drivingCarId = useGameStore(s => s.drivingCarId);
   const drivingFuel = useGameStore(s => s.drivingFuel);
+  const drivingSpeed = useGameStore(s => s.drivingSpeed);
+  // The driven car as a primitive key, so state broadcasts don't re-render the HUD
+  const drivingKey = useGameStore(s => {
+    const c = s.drivingCarId && s.playerId ? s.gameState?.players?.[s.playerId]?.inventory.find(x => x.id === s.drivingCarId) : null;
+    return c ? `${c.year}|${c.make}|${c.model}|${c.bodyStyle || ''}` : '';
+  });
   const raceTrackPrompt = useGameStore(s => s.raceTrackPrompt);
   const activeRace = useGameStore(s => s.activeRace);
   const raceHud = useGameStore(s => s.raceHud);
@@ -1757,6 +1829,8 @@ const RacingHud = (_props: { isMobile?: boolean }) => {
 
   const fmtMs = (ms: number) => { const total = ms / 1000; const m = Math.floor(total / 60); const s = total % 60; return `${m}:${s.toFixed(2).padStart(5, '0')}`; };
   const fuel = drivingFuel ?? 100;
+  const drivingCar = drivingKey ? (() => { const [year, make, model, bodyStyle] = drivingKey.split('|'); return { year, make, model, bodyStyle }; })() : null;
+  const drivingSpec = drivingCar ? getCarSpec(drivingCar) : null;
   const fuelColor = fuel > 50 ? '#22c55e' : fuel > 20 ? '#eab308' : '#ef4444';
   const stranded = drivingCarId && fuel <= 2;
 
@@ -1764,13 +1838,27 @@ const RacingHud = (_props: { isMobile?: boolean }) => {
     <>
       {/* Fuel gauge while driving */}
       {drivingCarId && drivingFuel !== null && !activeRace && (
-        <div className="fixed left-1/2 -translate-x-1/2 bottom-24 md:bottom-8 z-[930] pointer-events-none">
-          <div className="bg-black/75 backdrop-blur-md border border-white/15 rounded-xl px-4 py-2 shadow-xl flex items-center gap-3 w-64">
-            <Fuel size={18} style={{ color: fuelColor }} />
-            <div className="flex-grow">
-              <div className="h-2.5 bg-white/10 rounded-full overflow-hidden"><div className="h-full rounded-full transition-all" style={{ width: `${Math.max(0, Math.min(100, fuel))}%`, background: fuelColor }} /></div>
+        <div className="fixed left-1/2 -translate-x-1/2 top-[76px] md:top-auto md:bottom-8 z-[930] pointer-events-none">
+          <div className="bg-black/75 backdrop-blur-md border border-white/15 rounded-xl px-4 py-2 shadow-xl w-64">
+            {drivingCar && (
+              <div className="flex items-end justify-between gap-2 mb-1.5">
+                <div className="min-w-0">
+                  <div className="text-[11px] font-bold text-white truncate">{drivingCar.year} {drivingCar.make} {drivingCar.model}</div>
+                  <div className="text-[9px] text-gray-400 truncate">{specLine(drivingSpec!)}</div>
+                </div>
+                <div className="text-right shrink-0 leading-none">
+                  <span className="text-xl font-black font-mono tabular-nums text-white">{drivingSpeed}</span>
+                  <span className="text-[9px] text-gray-400 font-bold ml-0.5">MPH</span>
+                </div>
+              </div>
+            )}
+            <div className="flex items-center gap-3">
+              <Fuel size={18} style={{ color: fuelColor }} />
+              <div className="flex-grow">
+                <div className="h-2.5 bg-white/10 rounded-full overflow-hidden"><div className="h-full rounded-full transition-all" style={{ width: `${Math.max(0, Math.min(100, fuel))}%`, background: fuelColor }} /></div>
+              </div>
+              <span className="text-xs font-mono font-bold tabular-nums" style={{ color: fuelColor }}>{Math.round(fuel)}%</span>
             </div>
-            <span className="text-xs font-mono font-bold tabular-nums" style={{ color: fuelColor }}>{Math.round(fuel)}%</span>
           </div>
           {fuel <= 20 && fuel > 2 && <div className="text-center text-[10px] text-amber-400 font-bold uppercase tracking-widest mt-1">Low fuel — find a gas station</div>}
           {stranded && (
@@ -1881,9 +1969,12 @@ function App() {
   const gameState = useGameStore(s => s.gameState);
   const playerId = useGameStore(s => s.playerId);
   const activeInteraction = useGameStore(s => s.activeInteraction);
+  const drivingCarIdForPrompt = useGameStore(s => s.drivingCarId); // hide the walk-up prompt while driving
   const { connect, buyCar, buyPsi, buyPart, orderRepo, setMarketingTier, upgradeLot, endDay, openBankModal, openInsuranceModal, rentRaceCar } = useGameStore.getState();
-  const timeOfDay = gameState?.timeOfDay || 8.0;
-  const isAuctionOpen = timeOfDay >= 8.0 && timeOfDay < 17.0;
+  // The live clock (time_update every second), like the HUD badge and the sky:
+  // gameState.timeOfDay only changes on full updates, so it can be hours stale.
+  // Selecting the boolean re-renders only when the auction opens or closes.
+  const isAuctionOpen = useGameStore(s => s.timeOfDay >= 8.0 && s.timeOfDay < 17.0);
 
   const [nameInput, setNameInput] = useState('');
   const [lotScaleInput, setLotScaleInput] = useState<'Small' | 'Medium' | 'Large'>('Small');
@@ -1906,6 +1997,20 @@ function App() {
 
   // UI Toggle State
   const [showUI, setShowUI] = useState(true);
+  useEffect(() => { loadScene(); }, []); // prefetch the 3D world while on the setup screen
+  // The on-screen D-pad unmounts when the menu opens; release any held direction
+  // so its missing touch-end can't leave the car driving on its own.
+  useEffect(() => {
+    if (showUI) ['w', 'a', 's', 'd'].forEach(k => (window as any).setMobileKey?.(k, false));
+  }, [showUI]);
+  // The bank, insurance and repair popups live inside the UI layer, which is
+  // invisible while exploring; bring the UI back when one opens from the world.
+  const isBankModalOpen = useGameStore(s => s.isBankModalOpen);
+  const isInsuranceModalOpen = useGameStore(s => s.isInsuranceModalOpen);
+  const activeInspectionCarId = useGameStore(s => s.activeInspectionCarId);
+  useEffect(() => {
+    if (isBankModalOpen || isInsuranceModalOpen || activeInspectionCarId) setShowUI(true);
+  }, [isBankModalOpen, isInsuranceModalOpen, activeInspectionCarId]);
 
   // Mobile detection
   const [isMobile, setIsMobile] = useState(false);
@@ -1919,9 +2024,18 @@ function App() {
     return () => window.removeEventListener('resize', checkMobile);
   }, []);
 
+  // On phones the open menu covers the 3D view; on Low the world is then drawn less often.
+  useEffect(() => {
+    useGameStore.getState().setMenuCoversWorld(isMobile && showUI);
+  }, [isMobile, showUI]);
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Tab') {
+        // Let Tab move between fields while typing (chat, gate code, offers)
+        const el = document.activeElement as HTMLElement | null;
+        const tag = (el?.tagName || '').toLowerCase();
+        if (tag === 'input' || tag === 'textarea' || tag === 'select' || el?.isContentEditable) return;
         e.preventDefault();
         setShowUI(prev => !prev);
       }
@@ -1954,16 +2068,20 @@ function App() {
     }
   }, [playerId, gameState, autoShowGuide, hasShownInitialGuide]);
 
+  // Standalone operators start on their shop's tool. Runs when they join, not on
+  // every server update (that kept snapping the menu back from any other tab).
+  const activePlayer = gameState?.players[playerId || ''] as any;
+  const isStandaloneOp = !!activePlayer?.isStandaloneOperator;
+  const opSpecialty = activePlayer?.shopSpecialty;
   useEffect(() => {
-    const activePlayer = gameState?.players[playerId || ''];
-    if (activePlayer && (activePlayer as any).isStandaloneOperator) {
-      if ((activePlayer as any).shopSpecialty === 'body') {
+    if (isStandaloneOp) {
+      if (opSpecialty === 'body') {
         setActiveTab('standalone-body');
       } else {
         setActiveTab('standalone-shops');
       }
     }
-  }, [playerId, gameState]);
+  }, [playerId, isStandaloneOp, opSpecialty]);
 
   // Initial Connect screen
   if (!playerId || !gameState) {
@@ -2137,7 +2255,11 @@ function App() {
 
   return (
     <>
-      <VanillaThreeScene />
+      <ChunkBoundary className="absolute inset-0 z-0 grid place-items-center">
+        <Suspense fallback={<div className="absolute inset-0 z-0 grid place-items-center text-white/40 text-xs font-black uppercase tracking-widest">{t(lang, 'loading.world')}</div>}>
+          <VanillaThreeScene />
+        </Suspense>
+      </ChunkBoundary>
       <LiveMap gameState={gameState} playerId={playerId} isMobile={isMobile} />
       <GateControl isMobile={isMobile} />
       <GameChat isMobile={isMobile} />
@@ -2149,11 +2271,18 @@ function App() {
           Press [TAB] to {showUI ? 'Hide' : 'Show'} UI / Menu
         </div>
       )}
+      {!isMobile && (
+        // Above the minimap: the top edge belongs to the tab bar (and the race item slot)
+        <div className="fixed bottom-[136px] right-8 z-[999] pointer-events-auto">
+          <GraphicsToggle />
+        </div>
+      )}
 
       <div className={`ui-container flex flex-col p-3 md:p-6 h-full pointer-events-none relative z-10 transition-opacity duration-500 ${showUI ? 'opacity-100' : 'opacity-0'}`}>
 
         {/* Navigation Tabs (Standalone / Standoff Tabs) */}
-        <div className={`hidden md:flex justify-start md:justify-center mb-6 shrink-0 w-full max-w-[calc(100%-100px)] md:max-w-full ml-2 md:mx-auto overflow-hidden ${showUI ? 'pointer-events-auto' : 'pointer-events-none'}`}>
+        {/* md:pl keeps the first tab clear of the floating "← Exit to Launchpad" button (main.tsx) */}
+        <div className={`hidden md:flex justify-start md:justify-center mb-6 shrink-0 w-full max-w-[calc(100%-100px)] md:max-w-full ml-2 md:mx-auto md:pl-[200px] overflow-hidden ${showUI ? 'pointer-events-auto' : 'pointer-events-none'}`}>
           <div className="flex gap-2 bg-black/50 p-2 rounded-2xl border border-white/10 backdrop-blur-md overflow-x-auto max-w-full scrollbar-none whitespace-nowrap">
             {!me.isStandaloneOperator && (
               <button
@@ -2412,7 +2541,8 @@ function App() {
                         <div key={car.id} className="bg-white/5 border border-white/10 rounded p-3 text-sm">
                           <div className="font-bold flex items-center justify-between">
                             <div className="flex flex-col">
-                              <span>{car.year} {car.make}</span>
+                              <span>{car.year} {car.make} {car.model}</span>
+                              <span className="text-[10px] text-gray-400 font-normal mt-0.5">{specLine(getCarSpec(car))}</span>
                               <span className="text-[9px] text-gray-500 font-mono tracking-widest uppercase mt-0.5">{car.vin}</span>
                             </div>
                             <div className="flex gap-2 items-center">
@@ -3039,11 +3169,11 @@ function App() {
             )}
 
             {activeTab === 'standalone-shops' && (
-              <StandaloneShopPlatform />
+              <ChunkBoundary><Suspense fallback={<TabLoading />}><StandaloneShopPlatform /></Suspense></ChunkBoundary>
             )}
 
             {activeTab === 'standalone-body' && (
-              <ShopManagement />
+              <ChunkBoundary><Suspense fallback={<TabLoading />}><ShopManagement /></Suspense></ChunkBoundary>
             )}
 
           </AnimatePresence>
@@ -3054,45 +3184,6 @@ function App() {
         <InsuranceModal />
         <DealerGuideModal isOpen={showGuide} onClose={() => setShowGuide(false)} step={guideStep} setStep={setGuideStep} />
 
-        {/* Dynamic Action Interaction Overlay (Clickable/Tappable for both PC & Mobile) */}
-        {activeInteraction && (
-          <div className="fixed bottom-28 left-1/2 -translate-x-1/2 z-[1000] pointer-events-auto">
-            <button
-              onClick={() => {
-                if (activeInteraction.type === 'bank') {
-                  openBankModal();
-                } else if (activeInteraction.type === 'auction') {
-                  window.dispatchEvent(new CustomEvent('open_auction'));
-                } else if (activeInteraction.type === 'library') {
-                  window.dispatchEvent(new CustomEvent('open_library'));
-                } else if (activeInteraction.type === 'insurance') {
-                  openInsuranceModal();
-                } else if (activeInteraction.type === 'rental') {
-                  rentRaceCar();
-                } else if (activeInteraction.type === 'car' && activeInteraction.carId) {
-                  // Enter/exit driving state
-                  if ((window as any).setMobileTap) {
-                    (window as any).setMobileTap('e');
-                  } else {
-                    (window as any).setMobileKey('e', true);
-                    setTimeout(() => (window as any).setMobileKey('e', false), 100);
-                  }
-                }
-              }}
-              className="px-4 py-2 bg-gradient-to-r from-emerald-500/90 to-teal-600/90 hover:from-emerald-600 hover:to-teal-700 border border-emerald-400/40 text-white font-bold rounded-xl shadow-lg active:scale-95 transition-all text-[11px] uppercase tracking-widest flex items-center gap-2 backdrop-blur-md cursor-pointer select-none"
-            >
-              <span className="flex h-3 w-3 relative">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-3 w-3 bg-white"></span>
-              </span>
-              <span>{activeInteraction.label}</span>
-              <span className="text-emerald-200 text-xs font-medium ml-1">
-                {activeInteraction.type === 'car' ? '[E]' : '[R]'}
-              </span>
-            </button>
-          </div>
-        )}
-        
         {selectedAgentId && (
             <NegotiationModal 
                agentId={selectedAgentId} 
@@ -3258,11 +3349,54 @@ function App() {
 
       </div>
 
+      {/* Dynamic Action Interaction Overlay (Clickable/Tappable for both PC & Mobile). Outside the menu
+          container so it stays visible with the menu hidden; on phones it sits under the top buttons,
+          clear of the D-pad (it used to be an invisible tap target over the up arrow). */}
+      {activeInteraction && !drivingCarIdForPrompt && !(isMobile && showUI) && (
+        <div className={`fixed ${isMobile ? 'top-[76px]' : 'bottom-28'} left-1/2 -translate-x-1/2 z-[1000] pointer-events-auto`}>
+          <button
+            onClick={() => {
+              if (activeInteraction.type === 'bank') {
+                openBankModal();
+              } else if (activeInteraction.type === 'auction') {
+                window.dispatchEvent(new CustomEvent('open_auction'));
+              } else if (activeInteraction.type === 'library') {
+                window.dispatchEvent(new CustomEvent('open_library'));
+              } else if (activeInteraction.type === 'insurance') {
+                openInsuranceModal();
+              } else if (activeInteraction.type === 'rental') {
+                rentRaceCar();
+              } else if (activeInteraction.type === 'car' && activeInteraction.carId) {
+                // Enter/exit driving state
+                if ((window as any).setMobileTap) {
+                  (window as any).setMobileTap('e');
+                } else {
+                  (window as any).setMobileKey?.('e', true);
+                  setTimeout(() => (window as any).setMobileKey?.('e', false), 100);
+                }
+              }
+            }}
+            className="px-4 py-2 bg-gradient-to-r from-emerald-500/90 to-teal-600/90 hover:from-emerald-600 hover:to-teal-700 border border-emerald-400/40 text-white font-bold rounded-xl shadow-lg active:scale-95 transition-all text-[11px] uppercase tracking-widest flex items-center gap-2 backdrop-blur-md cursor-pointer select-none"
+          >
+            <span className="flex h-3 w-3 relative">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-3 w-3 bg-white"></span>
+            </span>
+            <span>{activeInteraction.label}</span>
+            <span className="text-emerald-200 text-xs font-medium ml-1">
+              {activeInteraction.type === 'car' ? '[E]' : '[R]'}
+            </span>
+          </button>
+        </div>
+      )}
+
       {/* On-Screen Mobile Touch Controls */}
       {isMobile && playerId && gameState && (
         <div className="fixed inset-0 pointer-events-none z-[999] flex flex-col justify-end p-6 select-none">
           {/* Top Right Floating Menu Toggle (Always visible, responsive alignment) */}
-          <div className="absolute top-6 right-6 pointer-events-auto z-[9999]">
+          <div className="absolute top-6 right-6 pointer-events-auto z-[9999] flex gap-2">
+            {/* Only while exploring: with the menu open it would cover the menu's top row (e.g. the Lot & Inventory tab) */}
+            {!showUI && <GraphicsToggle compact />}
             <button
               onClick={() => setShowUI(prev => !prev)}
               className={`border rounded-xl px-4 py-3 text-xs font-black uppercase tracking-widest active:scale-95 transition-all backdrop-blur-md shadow-lg ${showUI ? 'bg-red-500/20 text-red-500 border-red-500/30 hover:bg-red-500 hover:text-black' : 'bg-black/60 border-white/20 text-white shadow-black/40'}`}
@@ -3273,33 +3407,38 @@ function App() {
 
           {!showUI && (
             <div className="flex justify-between items-end w-full">
-              {/* Virtual D-Pad (Left Side) */}
-              <div className="flex flex-col gap-2 items-center pointer-events-auto">
+              {/* Virtual D-Pad (Left Side). Only the buttons take touches: the chat
+                  bubble sits in the empty corner beside ▲ and must stay tappable. */}
+              <div className="flex flex-col gap-2 items-center pointer-events-none [&_button]:pointer-events-auto">
                 <button
-                  onTouchStart={() => (window as any).setMobileKey('w', true)}
-                  onTouchEnd={() => (window as any).setMobileKey('w', false)}
+                  onTouchStart={() => (window as any).setMobileKey?.('w', true)}
+                  onTouchEnd={() => (window as any).setMobileKey?.('w', false)}
+                  onTouchCancel={() => (window as any).setMobileKey?.('w', false)}
                   className="w-14 h-14 bg-black/60 border-2 border-white/30 text-white font-bold rounded-xl active:bg-market active:text-black flex items-center justify-center text-lg shadow-lg active:scale-95 transition-transform select-none touch-none"
                 >
                   ▲
                 </button>
                 <div className="flex gap-2">
                   <button
-                    onTouchStart={() => (window as any).setMobileKey('a', true)}
-                    onTouchEnd={() => (window as any).setMobileKey('a', false)}
+                    onTouchStart={() => (window as any).setMobileKey?.('a', true)}
+                    onTouchEnd={() => (window as any).setMobileKey?.('a', false)}
+                    onTouchCancel={() => (window as any).setMobileKey?.('a', false)}
                     className="w-14 h-14 bg-black/60 border-2 border-white/30 text-white font-bold rounded-xl active:bg-market active:text-black flex items-center justify-center text-lg shadow-lg active:scale-95 transition-transform select-none touch-none"
                   >
                     ◀
                   </button>
                   <button
-                    onTouchStart={() => (window as any).setMobileKey('s', true)}
-                    onTouchEnd={() => (window as any).setMobileKey('s', false)}
+                    onTouchStart={() => (window as any).setMobileKey?.('s', true)}
+                    onTouchEnd={() => (window as any).setMobileKey?.('s', false)}
+                    onTouchCancel={() => (window as any).setMobileKey?.('s', false)}
                     className="w-14 h-14 bg-black/60 border-2 border-white/30 text-white font-bold rounded-xl active:bg-market active:text-black flex items-center justify-center text-lg shadow-lg active:scale-95 transition-transform select-none touch-none"
                   >
                     ▼
                   </button>
                   <button
-                    onTouchStart={() => (window as any).setMobileKey('d', true)}
-                    onTouchEnd={() => (window as any).setMobileKey('d', false)}
+                    onTouchStart={() => (window as any).setMobileKey?.('d', true)}
+                    onTouchEnd={() => (window as any).setMobileKey?.('d', false)}
+                    onTouchCancel={() => (window as any).setMobileKey?.('d', false)}
                     className="w-14 h-14 bg-black/60 border-2 border-white/30 text-white font-bold rounded-xl active:bg-market active:text-black flex items-center justify-center text-lg shadow-lg active:scale-95 transition-transform select-none touch-none"
                   >
                     ▶
@@ -3314,8 +3453,8 @@ function App() {
                     if ((window as any).setMobileTap) {
                       (window as any).setMobileTap('e');
                     } else {
-                      (window as any).setMobileKey('e', true);
-                      setTimeout(() => (window as any).setMobileKey('e', false), 100);
+                      (window as any).setMobileKey?.('e', true);
+                      setTimeout(() => (window as any).setMobileKey?.('e', false), 100);
                     }
                   }}
                   className="w-16 h-16 bg-blue-500/80 border-2 border-blue-400/50 text-white font-black rounded-full flex items-center justify-center text-xs shadow-lg active:scale-90 active:bg-blue-600 transition-all select-none touch-none"
@@ -3327,8 +3466,8 @@ function App() {
                     if ((window as any).setMobileTap) {
                       (window as any).setMobileTap('r');
                     } else {
-                      (window as any).setMobileKey('r', true);
-                      setTimeout(() => (window as any).setMobileKey('r', false), 100);
+                      (window as any).setMobileKey?.('r', true);
+                      setTimeout(() => (window as any).setMobileKey?.('r', false), 100);
                     }
                   }}
                   className="w-16 h-16 bg-green-500/80 border-2 border-green-400/50 text-white font-black rounded-full flex items-center justify-center text-xs shadow-lg active:scale-90 active:bg-green-600 transition-all select-none touch-none"
