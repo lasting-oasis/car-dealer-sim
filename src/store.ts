@@ -39,9 +39,20 @@ interface StoreState {
 
   // Fuel
   myWorldPos: { x: number; z: number } | null; // the local player's live world position, for a GPS that follows instantly
+  // Other players' live positions, relayed by the server ~10x/sec (kept out of
+  // gameState so the whole UI doesn't re-render on every movement packet).
+  playerPositions: Record<string, { x: number; y?: number; z: number; rotation?: number }>;
+  // 3D graphics level: 'low' turns off shadows and renders at 1x resolution.
+  graphicsQuality: 'high' | 'low';
+  setGraphicsQuality: (q: 'high' | 'low') => void;
+  // The phone menu is open over the 3D view: on Low the world is then drawn
+  // only ~10x a second while nothing moves the camera (VanillaThreeScene).
+  menuCoversWorld: boolean;
+  setMenuCoversWorld: (v: boolean) => void;
   setMyWorldPos: (p: { x: number; z: number }) => void;
   drivingFuel: number | null; // live tank level of the car being driven (0-100), for the HUD gauge
   setDrivingFuel: (fuel: number | null) => void;
+  drivingSpeed: number; // live speed of the car being driven, mph (updated with the fuel gauge, 5x/s)
   consumeFuel: (carId: string, fuel: number) => void;
   refuel: (carId: string, delivery?: boolean) => void;
 
@@ -94,6 +105,26 @@ interface StoreState {
   cancelInsurance: (type: 'liability' | 'inventory' | 'gap') => void;
 }
 
+// Saved graphics choice, or a sensible default: low on phones/tablets.
+function loadGraphicsQuality(): 'high' | 'low' {
+  try {
+    const saved = localStorage.getItem('cds.graphics');
+    if (saved === 'high' || saved === 'low') return saved;
+  } catch { /* storage blocked */ }
+  const touchOnly = typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches;
+  return touchOnly ? 'low' : 'high';
+}
+
+// Low graphics also drops the HUD's frosted-glass blur and endless pulse
+// animations (html.gfx-low in index.css): over the 3D view the browser has to
+// re-blur whatever is behind each blurred panel on every frame, because the
+// world under it changes every frame — a big cost on phones.
+function reflectGraphicsQuality(q: 'high' | 'low') {
+  if (typeof document !== 'undefined') document.documentElement.classList.toggle('gfx-low', q === 'low');
+}
+const initialGraphicsQuality = loadGraphicsQuality();
+reflectGraphicsQuality(initialGraphicsQuality);
+
 export const useGameStore = create<StoreState>((set, get) => ({
   socket: null,
   gameState: null,
@@ -112,9 +143,26 @@ export const useGameStore = create<StoreState>((set, get) => ({
 
   myWorldPos: null,
   setMyWorldPos: (p) => set({ myWorldPos: p }),
+  playerPositions: {},
+  graphicsQuality: initialGraphicsQuality,
+  setGraphicsQuality: (q) => {
+    try { localStorage.setItem('cds.graphics', q); } catch { /* storage blocked */ }
+    reflectGraphicsQuality(q);
+    set({ graphicsQuality: q });
+  },
+  menuCoversWorld: false,
+  setMenuCoversWorld: (v) => { if (get().menuCoversWorld !== v) set({ menuCoversWorld: v }); },
   drivingFuel: null,
   setDrivingFuel: (fuel) => set({ drivingFuel: fuel }),
-  consumeFuel: (carId, fuel) => { const s = get().socket; if (s) s.emit('consume_fuel', { carId, fuel }); },
+  drivingSpeed: 0,
+  consumeFuel: (carId, fuel) => {
+    const s = get().socket; if (s) s.emit('consume_fuel', { carId, fuel });
+    // The server stores it without sending a state update, so keep our copy of the tank in step
+    // (in place: nothing on screen shows it, so there is nothing to re-render). A stale copy made
+    // the 3D view take burnt fuel for a refuel and refill the tank on getting back in.
+    const st = get(); const car = st.gameState?.players[st.playerId || '']?.inventory.find(c => c.id === carId);
+    if (car) car.fuel = fuel;
+  },
   refuel: (carId, delivery) => { const s = get().socket; if (s) s.emit('refuel', { carId, delivery: !!delivery }); },
 
   raceTrackPrompt: false,
@@ -126,7 +174,9 @@ export const useGameStore = create<StoreState>((set, get) => ({
   raceDenied: null,
   clearRaceResult: () => set({ raceResult: null, raceDenied: null }),
   enterRace: (difficulty) => { const s = get().socket; if (s) s.emit('enter_race', { difficulty }); },
-  finishRace: (payload) => { const s = get().socket; if (s) s.emit('finish_race', payload); },
+  // Ends the race locally right away: an activeRace still set while the payout is on
+  // its way would be lined up again by the scene as a fresh entry.
+  finishRace: (payload) => { const s = get().socket; if (s) s.emit('finish_race', payload); set({ activeRace: null, raceHud: null }); },
   abortRace: () => set({ activeRace: null, raceHud: null }),
   rentRaceCar: () => { const s = get().socket; if (s) s.emit('rent_race_car'); },
   returnRental: () => { const s = get().socket; if (s) s.emit('return_rental'); },
@@ -197,7 +247,12 @@ export const useGameStore = create<StoreState>((set, get) => ({
   disconnect: () => {
     const socket = get().socket;
     if (socket) socket.disconnect();
-    set({ socket: null, gameState: null, playerId: null, drivingCarId: null, chatMessages: [], unreadChat: 0 });
+    set({ socket: null, gameState: null, playerId: null, drivingCarId: null, chatMessages: [], unreadChat: 0, playerPositions: {},
+      // Per-session prompts, race and modal state: left set, they reappear in the next
+      // session (gate keypad / speedway panel at spawn, a stale race grabbing the next car).
+      myWorldPos: null, drivingFuel: null, drivingSpeed: 0, gatePrompt: false, raceTrackPrompt: false, activeInteraction: null,
+      activeRace: null, raceHud: null, raceResult: null, raceDenied: null, heldItem: null, heldCount: 0,
+      activeInspectionCarId: null, activeInspectionShopType: null, isBankModalOpen: false, isInsuranceModalOpen: false });
   },
   connect: (name, lotScale, careerFocus, shopSpecialty) => {
     const isDev = ['5173', '5174', '5175', '5176', '5177', '5178', '5179'].includes(window.location.port);
@@ -216,7 +271,8 @@ export const useGameStore = create<StoreState>((set, get) => ({
     }
     
     socket.on('init', (data) => set({ gameState: data.state, playerId: data.id, timeOfDay: data.state.timeOfDay, chatMessages: data.state.chatLog || [], unreadChat: 0 }));
-    socket.on('update', (state) => set({ gameState: state }));
+    socket.on('update', (state) => set({ gameState: state, timeOfDay: state.timeOfDay }));
+    socket.on('player_positions', (positions) => set({ playerPositions: positions || {} }));
     socket.on('time_update', (timeOfDay) => set({ timeOfDay }));
     socket.on('race_started', (d) => set({ activeRace: d, raceResult: null, raceDenied: null }));
     socket.on('race_payout', (r) => set({ activeRace: null, raceHud: null, raceResult: r }));

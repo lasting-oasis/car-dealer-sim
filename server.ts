@@ -21,6 +21,11 @@ const SAFETY_FEE = 13.6;     // NC annual safety inspection fee
 const EMISSIONS_FEE = 30;    // NC OBD-II emissions fee (Mecklenburg is an emissions county)
 // Vehicles in the 3 newest model years AND under 70k miles are exempt from emissions.
 const emissionsRequired = (car: Car) => !((CURRENT_YEAR - car.year) <= 2 && car.mileage < 70000);
+// Where newly delivered stock lands: the delivery zone along the lot's left edge.
+// Cars stand side by side 6 units apart, nose toward the lot. (Lined up nose to
+// tail at that spacing, the 9-11-unit-long cars overlapped.)
+const dropOffSpot = (lot: { x: number; z: number }, index: number) =>
+    ({ x: lot.x - 40, z: lot.z + 15 + index * 6, r: -Math.PI / 2 });
 
 // Validate & clamp position payloads coming from clients. Rejects anything that
 // isn't a finite x/z so a malicious or buggy client can't inject NaN / Infinity
@@ -126,8 +131,11 @@ function broadcastState(io: Server, state: GameState) {
             }
         }
         const myWalkIns = state.activeWalkIns?.[id];
+        // The chat log is sent once on join ('init'); new messages arrive as 'chat'
+        // events, so it's left out of every state update to keep them small.
+        const { chatLog: _chatLog, ...shared } = state as any;
         socket.emit('update', {
-            ...state,
+            ...shared,
             players,
             activeWalkIns: myWalkIns ? { [id]: myWalkIns } : {}
         });
@@ -664,11 +672,7 @@ const economyTick = () => {
                                 daysOnLot: 0,
                                 isRegistered: true, // Repo is still in player's name
                                 ownerId: p.id,
-                                lotPosition: {
-                                     x: p.lotPosition.x - 40,
-                                     z: p.lotPosition.z + 15 + (unparkedCount * 6),
-                                     r: 0
-                                }
+                                lotPosition: dropOffSpot(p.lotPosition, unparkedCount)
                             });
                         }
                         return false; // Contract voided upon recovery
@@ -802,15 +806,44 @@ setInterval(() => {
     }
 }, 1000);
 
+// Live player positions. Clients send theirs ~10x/sec (sync_player_pos); this
+// relays everyone's to everyone at the same rate so other players move smoothly
+// instead of only updating when some unrelated event triggers a full broadcast.
+// Only sent while someone's position is actually changing (clients keep resending
+// theirs while standing still). Volatile: a dropped packet is fine, the next one is
+// 100 ms away; 300 ms after movement stops, one final copy is sent reliably so a
+// client that dropped the last moving packets isn't left with stale positions.
+let positionsDirty = false;
+let quietTicks = 3; // relay ticks since a position last changed
+setInterval(() => {
+    if (positionsDirty) quietTicks = 0;
+    else if (++quietTicks !== 3) return;
+    const positions: Record<string, any> = {};
+    for (const pid in gameState.players) {
+        const wp = (gameState.players[pid] as any).worldPosition;
+        if (wp) positions[pid] = wp;
+    }
+    if (positionsDirty) {
+        positionsDirty = false;
+        io.volatile.emit('player_positions', positions);
+    } else {
+        io.emit('player_positions', positions);
+    }
+}, 100);
+
 io.on('connection', (socket) => {
     socket.on('join', ({ name, lotScale, careerFocus, shopSpecialty }) => {
       console.log('--- PLAYER JOIN ---', { name, lotScale, careerFocus, shopSpecialty });
       if (!gameState.hostId) {
           gameState.hostId = socket.id;
       }
-      const playerCount = Object.keys(gameState.players).length;
-      let x = (playerCount % 5) * 250;
-      let z = Math.floor(playerCount / 5) * -250;
+      // Take the first lot slot no current player holds. (Using the player count
+      // gave a newcomer the lot of someone still here once anyone had left.)
+      const takenLots = new Set(Object.values(gameState.players).map(p => `${p.lotPosition?.x},${p.lotPosition?.z}`));
+      let slot = 0;
+      while (takenLots.has(`${(slot % 5) * 250},${Math.floor(slot / 5) * -250}`)) slot++;
+      let x = (slot % 5) * 250;
+      let z = Math.floor(slot / 5) * -250;
 
       let initMoney = 25000;
       let isStandalone = careerFocus === 'standalone';
@@ -882,11 +915,7 @@ io.on('connection', (socket) => {
             car.isProcessed = false;
             // Spawn inside the red Drop-Off Zone lined up neatly
             const unparkedCount = player.inventory.filter(c => !c.isProcessed).length;
-            car.lotPosition = { 
-                 x: player.lotPosition.x - 40, 
-                 z: player.lotPosition.z + 15 + (unparkedCount * 6), 
-                 r: 0 
-            };
+            car.lotPosition = dropOffSpot(player.lotPosition, unparkedCount);
             player.inventory.push(car);
             gameState.market.splice(carIndex, 1);
             broadcastState(io, gameState);
@@ -900,11 +929,7 @@ io.on('connection', (socket) => {
             car.isProcessed = false;
             // Spawn inside the red Drop-Off Zone lined up neatly
             const unparkedCount = player.inventory.filter(c => !c.isProcessed).length;
-            car.lotPosition = { 
-                 x: player.lotPosition.x - 40, 
-                 z: player.lotPosition.z + 15 + (unparkedCount * 6), 
-                 r: 0 
-            };
+            car.lotPosition = dropOffSpot(player.lotPosition, unparkedCount);
             player.inventory.push(car);
             gameState.market.splice(carIndex, 1);
             broadcastState(io, gameState);
@@ -924,6 +949,10 @@ io.on('connection', (socket) => {
   socket.on('sync_player_pos', (pos) => {
       const clean = sanitizePosition(pos);
       if (gameState.players[socket.id] && clean) {
+          const prev: any = gameState.players[socket.id].worldPosition;
+          if (!prev || prev.x !== clean.x || prev.y !== clean.y || prev.z !== clean.z || prev.r !== clean.r || prev.rotation !== clean.rotation) {
+              positionsDirty = true; // only a real move needs relaying
+          }
           gameState.players[socket.id].worldPosition = clean as any;
       }
   });
@@ -1223,11 +1252,7 @@ io.on('connection', (socket) => {
               mileage: 120000 + Math.floor(Math.random() * 80000),
               isRegistered: false,
               ownerId: player.id,
-              lotPosition: {
-                   x: player.lotPosition.x - 40,
-                   z: player.lotPosition.z + 15 + (unparkedCount * 6),
-                   r: 0
-              }
+              lotPosition: dropOffSpot(player.lotPosition, unparkedCount)
           });
       }
 
@@ -1476,11 +1501,7 @@ io.on('connection', (socket) => {
           player.balanceSheet.lastTickExpense += car.buyPrice;
           car.ownerId = player.id;
           const unparkedCount = player.inventory.filter(c => !c.isProcessed).length;
-          car.lotPosition = { 
-               x: player.lotPosition.x - 40, 
-               z: player.lotPosition.z + 15 + (unparkedCount * 6), 
-               r: 0 
-          };
+          car.lotPosition = dropOffSpot(player.lotPosition, unparkedCount);
           player.inventory.push(car);
           gameState.junkyard.splice(index, 1);
           broadcastState(io, gameState);
@@ -1832,6 +1853,10 @@ async function startServer() {
     } else {
         const distDir = path.join(process.cwd(), 'dist');
         app.use(express.static(distDir));
+        // A missing build file (e.g. a chunk from before the last deploy) is a 404.
+        // Answering with index.html instead made the browser reject it as a script
+        // with a confusing MIME-type error.
+        app.use('/assets', (_req, res) => { res.sendStatus(404); });
         // SPA fallback: serve index.html for any non-asset route so refreshes /
         // deep links don't 404. (socket.io traffic is handled before Express.)
         app.get('*', (_req, res) => {

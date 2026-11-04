@@ -10,7 +10,7 @@ export const getLang = (): Lang => {
 };
 export const setLang = (l: Lang) => {
   try { localStorage.setItem(KEY, l); } catch { /* ignore */ }
-  window.dispatchEvent(new CustomEvent('cds-langchange'));
+  window.dispatchEvent(new CustomEvent('micar-langchange'));
 };
 
 // Re-renders the calling component whenever the language changes.
@@ -18,8 +18,8 @@ export const useLang = (): Lang => {
   const [lang, setL] = useState<Lang>(getLang());
   useEffect(() => {
     const h = () => setL(getLang());
-    window.addEventListener('cds-langchange', h);
-    return () => window.removeEventListener('cds-langchange', h);
+    window.addEventListener('micar-langchange', h);
+    return () => window.removeEventListener('micar-langchange', h);
   }, []);
   return lang;
 };
@@ -29,11 +29,11 @@ const DICT: Record<string, Entry> = {
   // ---- Gateway / landing page ----
   'portal.brand': { en: 'AUTO LOGISTICS PORTAL', es: 'PORTAL DE LOGÍSTICA AUTO' },
   'portal.title': { en: 'Automotive Hub', es: 'Centro Automotriz' },
-  'portal.subtitle': { en: 'Select an operational workspace. Experience the premium 3D dealership simulator or deploy our real-world reconditioning logistics dashboard.', es: 'Elige un espacio de trabajo. Disfruta el simulador 3D de concesionario o usa nuestro panel de logística de reacondicionamiento del mundo real.' },
+  'portal.subtitle': { en: 'Select an operational workspace. Experience the 3D MiCar Dealer Simulator or deploy our real-world reconditioning logistics dashboard.', es: 'Elige un espacio de trabajo. Disfruta el Simulador de Concesionario MiCar en 3D o usa nuestro panel de logística de reacondicionamiento del mundo real.' },
   'portal.footer': { en: 'SYSTEM SECURITY CLASSIFICATION: COMMERCIAL SYSTEM • SECURED VIA INTEGRATED SECURE PROTOCOLS', es: 'CLASIFICACIÓN DE SEGURIDAD: SISTEMA COMERCIAL • PROTEGIDO CON PROTOCOLOS SEGUROS INTEGRADOS' },
 
   'card.game.badge': { en: 'GAME EXPERIENCE', es: 'EXPERIENCIA DE JUEGO' },
-  'card.game.title': { en: 'Dealership 3D Simulator', es: 'Simulador 3D de Concesionario' },
+  'card.game.title': { en: 'MiCar Dealer Simulator', es: 'Simulador de Concesionario MiCar' },
   'card.game.desc': { en: 'Step onto the virtual showroom floor. An immersive 3D environment for buying, bidding, restoring, and selling vehicles with advanced financial forecasting.', es: 'Entra al salón de exhibición virtual. Un entorno 3D inmersivo para comprar, pujar, restaurar y vender vehículos con pronóstico financiero avanzado.' },
   'card.game.f1': { en: 'Real-Time 3D Interactive Lot & Canvas', es: 'Lote 3D Interactivo en Tiempo Real' },
   'card.game.f2': { en: 'Live Bidding Auction Mechanics', es: 'Subastas con Pujas en Vivo' },
@@ -69,7 +69,7 @@ const DICT: Record<string, Entry> = {
   'card.platform.cta': { en: 'Launch RepairFlow Platform', es: 'Iniciar Plataforma RepairFlow' },
 
   // ---- Pre-game setup screen ----
-  'setup.title': { en: 'Used Car Empire', es: 'Imperio de Autos Usados' },
+  'setup.title': { en: 'MiCar Dealer Simulator', es: 'Simulador de Concesionario MiCar' },
   'setup.subtitle': { en: 'Initialize corporate simulator', es: 'Inicializa el simulador corporativo' },
   'setup.nameLabel': { en: 'Company Operator Name', es: 'Nombre del Operador' },
   'setup.namePlaceholder': { en: 'e.g. Apex Corporate', es: 'ej. Apex Corporate' },
@@ -99,9 +99,32 @@ const DICT: Record<string, Entry> = {
   'setup.showGuide': { en: 'Show Guide', es: 'Ver Guía' },
   'setup.optOut': { en: 'Opt Out', es: 'Omitir' },
   'setup.establish': { en: 'Establish Connection', es: 'Establecer Conexión' },
+
+  // ---- In-game graphics quality button ----
+  'graphics.high': { en: 'Graphics: high', es: 'Gráficos: alto' },
+  'graphics.low': { en: 'Graphics: low', es: 'Gráficos: bajo' },
+  'graphics.highShort': { en: 'HQ', es: 'Alto' },
+  'graphics.lowShort': { en: 'LQ', es: 'Bajo' },
+  'graphics.toHigh': { en: 'Switch to high graphics', es: 'Cambiar a gráficos altos' },
+  'graphics.toLow': { en: 'Switch to low graphics', es: 'Cambiar a gráficos bajos' },
+  'graphics.highAria': { en: 'Graphics quality: high. Switch to low.', es: 'Gráficos: alto. Cambiar a bajo.' },
+  'graphics.lowAria': { en: 'Graphics quality: low. Switch to high.', es: 'Gráficos: bajo. Cambiar a alto.' },
+
+  // ---- Loading screens & error notice ----
+  'loading.default': { en: 'Loading…', es: 'Cargando…' },
+  'loading.world': { en: 'Loading 3D world…', es: 'Cargando mundo 3D…' },
+  'error.notice': { en: 'Something went wrong. If the game stops responding, reload the page.', es: 'Algo salió mal. Si el juego deja de responder, recarga la página.' },
+  'error.dismiss': { en: 'Dismiss', es: 'Cerrar' },
+  'error.screen': { en: "Couldn't load this screen.", es: 'No se pudo cargar esta pantalla.' },
+  'error.reload': { en: 'Reload', es: 'Recargar' },
 };
 
 export const t = (lang: Lang, key: string): string => DICT[key]?.[lang] ?? key;
+
+// The brand is always written "MiCar", even inside an all-caps heading: wrap it so the
+// heading's uppercase styling leaves it alone ("MiCar DEALER SIMULATOR").
+export const withBrand = (text: string) =>
+  text.split(/(MiCar)/).map((part, i) => part === 'MiCar' ? <span key={i} className="normal-case">MiCar</span> : part);
 
 // EN | ES pill toggle, usable on any dark screen.
 export const LangToggle = ({ className = '' }: { className?: string }) => {
